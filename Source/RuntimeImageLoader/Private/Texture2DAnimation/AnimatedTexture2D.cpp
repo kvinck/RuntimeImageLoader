@@ -8,6 +8,20 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogAnimatedTexture, Log, All);
 
+void UAnimatedTexture2D::BeginDestroy()
+{
+	bPlaying = false;
+	Decoder.Reset();
+	Super::BeginDestroy();
+}
+
+void UAnimatedTexture2D::ReleaseResources()
+{
+	bPlaying = false;
+	Decoder.Reset();
+	MarkAsGarbage();
+}
+
 float UAnimatedTexture2D::GetSurfaceWidth() const
 {
 	if (Decoder) return Decoder->GetWidth();

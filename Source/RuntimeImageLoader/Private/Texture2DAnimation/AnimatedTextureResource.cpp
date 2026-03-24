@@ -129,7 +129,7 @@ void FAnimatedTextureResource::InitRHI(FRHICommandListBase& RHICmdList)
         .SetNumSamples(1)
         .SetFlags(Flags)
         .SetInitialState(ERHIAccess::Unknown)
-        .SetBulkData(FirstFrameData ? &GifBulkData : nullptr)
+        .SetInitActionBulkData(FirstFrameData ? &GifBulkData : nullptr)
     );
 #elif (ENGINE_MAJOR_VERSION == 5) && (ENGINE_MINOR_VERSION > 0)
 	FRHIResourceCreateInfo CreateInfo(*Name);

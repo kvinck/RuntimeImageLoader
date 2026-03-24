@@ -54,7 +54,12 @@ void URuntimeGifReader::SubmitRequest(FGifReadRequest&& InRequest, bool bSynchro
 
 		return;
 	}
-	
+
+	// Prevent GC from collecting this object while the async task is running.
+	// Without this, the Blueprint can drop its reference (e.g., by starting a new load),
+	// causing GC to destroy this object and its Decoder while DecodeGIF() is still writing to memory.
+	AddToRoot();
+
 	CurrentTask = Async(
 		EAsyncExecution::ThreadPool,
 		[this, bIsCallerGameThread]()
@@ -185,7 +190,7 @@ void URuntimeGifReader::OnPostProcessRequest()
 		{
 			if (ReadResult.OutError.IsEmpty())
 			{
-				UE_LOG(RuntimeGifReader, Log, TEXT("OnPostProcessRequest: Broadcasting success. Texture valid=%d, bPlaying=%d"), 
+				UE_LOG(RuntimeGifReader, Log, TEXT("OnPostProcessRequest: Broadcasting success. Texture valid=%d, bPlaying=%d"),
 					IsValid(ReadResult.OutTexture), ReadResult.OutTexture ? ReadResult.OutTexture->IsPlaying() : false);
 				OnSuccess.Broadcast(ReadResult.OutTexture);
 			}
@@ -194,6 +199,13 @@ void URuntimeGifReader::OnPostProcessRequest()
 				UE_LOG(RuntimeGifReader, Error, TEXT("OnPostProcessRequest: Broadcasting failure. Error: %s"), *ReadResult.OutError);
 				OnFail.Broadcast(ReadResult.OutError);
 			}
+
+			// Release reference so the texture can be GC'd when Blueprint is done with it
+			ReadResult.OutTexture = nullptr;
+			ReadResult.OutError.Empty();
+
+			// Allow GC to collect this object now that the async work is complete
+			RemoveFromRoot();
 		}
 	);
 }

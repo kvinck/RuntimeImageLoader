@@ -86,6 +86,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = RuntimeAnimatedTexture)
 	int32 GetSizeY() const { return GetHeight(); }
 
+	/** Immediately releases decoder memory and marks the texture for garbage collection.
+	    Call this on the old texture before loading a new animated image to avoid high memory usage. */
+	UFUNCTION(BlueprintCallable, Category = RuntimeAnimatedTexture)
+	void ReleaseResources();
+
 public:
 	/** @See Texture2DDynamic Class
 		Creates and initializes a new AnimatedTexture2D with the requested settings 
@@ -143,6 +148,7 @@ protected:
 	void RenderFrameToTexture();
 
 protected:
+	virtual void BeginDestroy() override;
 	virtual FTextureResource* CreateResource() override;
 	virtual EMaterialValueType GetMaterialType() const override { return MCT_Texture2D; }
 
