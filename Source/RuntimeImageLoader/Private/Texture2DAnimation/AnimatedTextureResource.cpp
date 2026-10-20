@@ -10,7 +10,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogAnimatedTextureResource, Log, All);
 struct FGifDataResource : public FResourceBulkDataInterface
 {
 public:
-	FGifDataResource(void* InMipData, int32 InDataSize)
+	FGifDataResource(void* InMipData, uint32 InDataSize)
 		: MipData(InMipData), DataSize(InDataSize)
 	{}
 
@@ -20,7 +20,7 @@ public:
 
 private:
 	void* MipData;
-	int32 DataSize;
+	uint32 DataSize;
 };
 
 

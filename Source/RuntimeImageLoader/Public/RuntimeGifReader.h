@@ -34,6 +34,7 @@ struct RUNTIMEIMAGELOADER_API FGifReadResult
 public:
 	FString GifFilename = TEXT("");
 
+	UPROPERTY()
 	UAnimatedTexture2D* OutTexture = nullptr;
 
 	FString OutError = TEXT("");

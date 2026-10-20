@@ -11,6 +11,13 @@ DEFINE_LOG_CATEGORY_STATIC(LogAnimatedTexture, Log, All);
 void UAnimatedTexture2D::BeginDestroy()
 {
 	bPlaying = false;
+
+	// Safe to destroy decoder here without flushing render commands because
+	// RenderFrameToTexture() copies frame data into the render command's lambda,
+	// so in-flight render commands own their own data and don't reference the decoder.
+	// WARNING: Do NOT call FlushRenderingCommands() here — BeginDestroy is called
+	// during GC, and flushing pumps the game thread queue, causing re-entrant UObject
+	// operations that corrupt GC state.
 	Decoder.Reset();
 	Super::BeginDestroy();
 }
@@ -18,6 +25,8 @@ void UAnimatedTexture2D::BeginDestroy()
 void UAnimatedTexture2D::ReleaseResources()
 {
 	bPlaying = false;
+
+	// Safe to destroy decoder without flushing — render commands copy their own frame data.
 	Decoder.Reset();
 	MarkAsGarbage();
 }
@@ -134,16 +143,34 @@ UAnimatedTexture2D* UAnimatedTexture2D::Create(int32 InSizeX, int32 InSizeY, con
 
 void UAnimatedTexture2D::SetDecoder(TUniquePtr<IGIFLoader> DecoderState)
 {
+	FScopeLock ResultsLock(&ResultsMutex);
+
 	Decoder = MoveTemp(DecoderState);
-	
-	if (Decoder.IsValid())
+	FirstFrameCache.Reset();
+
+	if (!Decoder.IsValid())
 	{
-		UE_LOG(LogAnimatedTexture, Log, TEXT("SetDecoder: Decoder set successfully. TotalFrames=%d, Size=%dx%d"), 
-			Decoder->GetTotalFrames(), Decoder->GetWidth(), Decoder->GetHeight());
+		UE_LOG(LogAnimatedTexture, Error, TEXT("SetDecoder: Decoder is invalid after move!"));
+		return;
+	}
+
+	UE_LOG(LogAnimatedTexture, Log, TEXT("SetDecoder: Decoder set successfully. TotalFrames=%d, Size=%dx%d"),
+		Decoder->GetTotalFrames(), Decoder->GetWidth(), Decoder->GetHeight());
+
+	// Grab the seed frame now, on the game thread. InitRHI() runs on the render thread and
+	// must not read the decoder's frame buffer directly — while streaming, that buffer is
+	// reused and rewritten by every GetNextFrame() call from Tick().
+	const int64 FrameBytes = (int64)Decoder->GetWidth() * Decoder->GetHeight() * sizeof(FColor);
+	const FColor* FrameData = (FrameBytes > 0) ? Decoder->GetNextFrame(0) : nullptr;
+
+	if (FrameData != nullptr)
+	{
+		FirstFrameCache.SetNumUninitialized((int32)FrameBytes);
+		FMemory::Memcpy(FirstFrameCache.GetData(), FrameData, FrameBytes);
 	}
 	else
 	{
-		UE_LOG(LogAnimatedTexture, Error, TEXT("SetDecoder: Decoder is invalid after move!"));
+		UE_LOG(LogAnimatedTexture, Warning, TEXT("SetDecoder: Could not read the first frame. Texture will be created without initial data."));
 	}
 }
 
@@ -151,36 +178,67 @@ void UAnimatedTexture2D::RenderFrameToTexture()
 {
 	FScopeLock ResultsLock(&ResultsMutex);
 
-	if (CurrentFrame > Decoder->GetTotalFrames() - 1 && bLooping) CurrentFrame = 0;
+	if (!Decoder.IsValid())
+	{
+		UE_LOG(LogAnimatedTexture, Error, TEXT("RenderFrameToTexture: Decoder is null!"));
+		return;
+	}
 
-	FRenderCommandData CommandData;
+	const int32 TotalFrames = Decoder->GetTotalFrames();
+	if (TotalFrames <= 0)
+	{
+		return;
+	}
 
-	CommandData.RHIResource = GetResource();
-	CommandData.RawData = (const uint8*)Decoder->GetNextFrame(CurrentFrame);
+	// Clamp frame index to valid range
+	if (CurrentFrame < 0 || CurrentFrame >= TotalFrames)
+	{
+		if (bLooping)
+		{
+			CurrentFrame = 0;
+		}
+		else
+		{
+			CurrentFrame = FMath::Clamp(CurrentFrame, 0, TotalFrames - 1);
+		}
+	}
 
-	UE_LOG(LogAnimatedTexture, Verbose, TEXT("RenderFrameToTexture: Frame=%d, RHIResource=%p, RawData=%p"), 
-		CurrentFrame, CommandData.RHIResource, CommandData.RawData);
+	FTextureResource* RHIResource = GetResource();
+	const FColor* FrameData = Decoder->GetNextFrame(CurrentFrame);
 
-	if (!CommandData.RHIResource)
+	UE_LOG(LogAnimatedTexture, Verbose, TEXT("RenderFrameToTexture: Frame=%d, RHIResource=%p, RawData=%p"),
+		CurrentFrame, RHIResource, FrameData);
+
+	if (!RHIResource)
 	{
 		UE_LOG(LogAnimatedTexture, Error, TEXT("RenderFrameToTexture: RHIResource is null!"));
 		return;
 	}
 
-	if (!CommandData.RawData)
+	// Validate that FrameData points into the decoder's actual texture data, not the
+	// single-pixel &FColor::Black fallback which would cause a buffer overread
+	if (!FrameData)
 	{
 		UE_LOG(LogAnimatedTexture, Error, TEXT("RenderFrameToTexture: RawData is null for frame %d!"), CurrentFrame);
 		return;
 	}
 
-	/** @See AsyncTaskDownloadImage Class, How to Pass Texture Content Data To Render QUEUE at Runtime */
-	ENQUEUE_RENDER_COMMAND(AnimTexture2D_RenderFrame)(
-		[CommandData](FRHICommandListImmediate& RHICmdList)
-		{
-			if (!CommandData.RHIResource || !CommandData.RHIResource->TextureRHI)
-			return;
+	// Copy frame data so the render command owns its own buffer.
+	// This prevents dangling pointer crashes if the decoder is destroyed before the
+	// render command executes on the render thread.
+	// Single frame only — SizeX * SizeY * 4 is well within int32 for any GPU-supported texture size.
+	const int32 FrameSize = SizeX * SizeY * (int32)sizeof(FColor);
+	TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> FrameBuffer = MakeShared<TArray<uint8>, ESPMode::ThreadSafe>();
+	FrameBuffer->SetNumUninitialized(FrameSize);
+	FMemory::Memcpy(FrameBuffer->GetData(), FrameData, FrameSize);
 
-			FTexture2DRHIRef Texture2DRHI = CommandData.RHIResource->TextureRHI->GetTexture2D();
+	ENQUEUE_RENDER_COMMAND(AnimTexture2D_RenderFrame)(
+		[RHIResource, FrameBuffer](FRHICommandListImmediate& RHICmdList)
+		{
+			if (!RHIResource || !RHIResource->TextureRHI)
+				return;
+
+			FTexture2DRHIRef Texture2DRHI = RHIResource->TextureRHI->GetTexture2D();
 			if (!Texture2DRHI)
 				return;
 
@@ -193,7 +251,7 @@ void UAnimatedTexture2D::RenderFrameToTexture()
 			Region.Width = TexWidth;
 			Region.Height = TexHeight;
 
-			RHIUpdateTexture2D(Texture2DRHI, 0, Region, SrcPitch, CommandData.RawData);
+			RHIUpdateTexture2D(Texture2DRHI, 0, Region, SrcPitch, FrameBuffer->GetData());
 		}
 	);
 }
@@ -217,19 +275,31 @@ void UAnimatedTexture2D::PlayFromStart()
 
 void UAnimatedTexture2D::StepForward()
 {
+	if (!Decoder.IsValid()) return;
 	CurrentFrame++;
+	if (CurrentFrame >= Decoder->GetTotalFrames())
+	{
+		CurrentFrame = bLooping ? 0 : Decoder->GetTotalFrames() - 1;
+	}
 	RenderFrameToTexture();
 }
 
 void UAnimatedTexture2D::StepBackward()
 {
+	if (!Decoder.IsValid()) return;
 	CurrentFrame--;
+	if (CurrentFrame < 0)
+	{
+		CurrentFrame = bLooping ? Decoder->GetTotalFrames() - 1 : 0;
+	}
 	RenderFrameToTexture();
 }
 
 void UAnimatedTexture2D::GotoFrame(const int32 NewFrame)
 {
-	CurrentFrame = NewFrame;
+	if (!Decoder.IsValid()) return;
+	const int32 TotalFrames = Decoder->GetTotalFrames();
+	CurrentFrame = FMath::Clamp(NewFrame, 0, TotalFrames > 0 ? TotalFrames - 1 : 0);
 	RenderFrameToTexture();
 }
 
@@ -249,26 +319,25 @@ void UAnimatedTexture2D::Init(int32 InSizeX, int32 InSizeY, EPixelFormat InForma
 	NumMips = 1;
 	bIsResolveTarget = InIsResolveTarget;
 
-	UE_LOG(LogAnimatedTexture, Log, TEXT("Init: Size=%dx%d, Format=%d, bIsResolveTarget=%d, Decoder valid=%d"), 
+	UE_LOG(LogAnimatedTexture, Log, TEXT("Init: Size=%dx%d, Format=%d, bIsResolveTarget=%d, Decoder valid=%d"),
 		SizeX, SizeY, (int32)Format, bIsResolveTarget, Decoder.IsValid());
 
-	// Initialize the resource.
-	// NOTE: This is called BEFORE SetDecoder(), so Decoder will be null here.
-	// GetFirstFrameData() will be called during resource init and will crash if Decoder is null.
-	UpdateResource();
+	// Do NOT call UpdateResource() here — Decoder is not set yet.
+	// UpdateResource() is called later from CreateTextureOnGameThread() after SetDecoder().
 }
 
 const uint8* UAnimatedTexture2D::GetFirstFrameData() const
 {
-	if (!Decoder.IsValid())
+	// Served from the cache filled in SetDecoder() — see FirstFrameCache for why the
+	// render thread must not reach into the decoder itself.
+	if (FirstFrameCache.Num() != (int32)GetFrameSize())
 	{
-		UE_LOG(LogAnimatedTexture, Warning, TEXT("GetFirstFrameData: Decoder is not valid! Returning nullptr."));
+		UE_LOG(LogAnimatedTexture, Warning, TEXT("GetFirstFrameData: Seed frame is %d bytes but the texture needs %u. Returning nullptr."),
+			FirstFrameCache.Num(), GetFrameSize());
 		return nullptr;
 	}
 
-	const uint8* FrameData = (const uint8*)Decoder->GetNextFrame(CurrentFrame);
-	UE_LOG(LogAnimatedTexture, Log, TEXT("GetFirstFrameData: Frame=%d, FrameData=%p"), CurrentFrame, FrameData);
-	return FrameData;
+	return FirstFrameCache.GetData();
 }
 
 uint32 UAnimatedTexture2D::GetFrameSize() const

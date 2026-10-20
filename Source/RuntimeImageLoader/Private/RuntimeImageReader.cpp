@@ -202,8 +202,11 @@ bool URuntimeImageReader::ProcessRequest(FImageReadRequest& Request)
         return false;
     }
 
-    // sanity check
-    check(ImageBuffer.Num() > 0);
+    if (ImageBuffer.Num() == 0)
+    {
+        PendingReadResult.OutError = TEXT("No image data available after read attempt");
+        return false;
+    }
 
     // early exit: return pure bytes
     if (Request.TransformParams.bOnlyBytes)
@@ -247,9 +250,16 @@ bool URuntimeImageReader::ProcessRequest(FImageReadRequest& Request)
         return false;
     }
 
-    // sanity checks
-    check(ImageData.RawData.Num() > 0);
-    check(ImageData.TextureSourceFormat != TSF_Invalid);
+    if (ImageData.RawData.Num() == 0)
+    {
+        PendingReadResult.OutError = TEXT("Image decode produced empty data");
+        return false;
+    }
+    if (ImageData.TextureSourceFormat == TSF_Invalid)
+    {
+        PendingReadResult.OutError = TEXT("Image has invalid texture source format");
+        return false;
+    }
 
     ImageData.PixelFormat = DeterminePixelFormat(ImageData.Format, Request.TransformParams);
     if (ImageData.PixelFormat == PF_Unknown)

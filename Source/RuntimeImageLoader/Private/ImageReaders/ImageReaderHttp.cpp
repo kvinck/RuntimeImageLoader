@@ -68,8 +68,19 @@ void FImageReaderHttp::Cancel()
 
 void FImageReaderHttp::HandleImageRequest(FHttpRequestPtr HttpRequest, FHttpResponsePtr HttpResponse, bool bSucceeded)
 {
+    if (!bSucceeded || !HttpResponse.IsValid())
+    {
+        OutError = TEXT("HTTP request failed: no response received (timeout or connection error)");
+
+        if (DownloadFuture && !DownloadFuture->IsComplete())
+        {
+            DownloadFuture->EmplaceResult(false);
+        }
+        return;
+    }
+
     bool bSuccess = HttpResponse->GetResponseCode() == 200;
-    
+
     if (bSuccess)
     {
         OutImageData.Append(HttpResponse->GetContent().GetData(), HttpResponse->GetContentLength());

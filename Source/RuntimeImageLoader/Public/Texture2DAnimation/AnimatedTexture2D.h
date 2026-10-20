@@ -178,6 +178,13 @@ private:
 private:
 	TUniquePtr<IGIFLoader> Decoder;
 
+	/**
+	 * Copy of the frame used to seed the RHI texture, taken on the game thread in SetDecoder().
+	 * The render thread reads this in InitRHI() rather than calling into the decoder: large
+	 * animations decode on demand into a single reused buffer that the game thread overwrites.
+	 */
+	TArray<uint8> FirstFrameCache;
+
 	float FrameDelay = 0.0f;
 	float FrameTime = 0.0f;
 	bool bPlaying = false;

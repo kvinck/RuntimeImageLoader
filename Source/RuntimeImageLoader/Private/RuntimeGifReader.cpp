@@ -103,10 +103,18 @@ void URuntimeGifReader::ProcessRequest()
 		ImageBuffer = MoveTemp(Request.InputGif.ImageBytes);
 	}
 
-	check (ImageBuffer.Num() > 0);
+	if (ImageBuffer.Num() == 0)
+	{
+		ReadResult.OutError = FString::Printf(TEXT("Failed to read GIF: no image data available for %s"), *GifFilename);
+		return;
+	}
 
 	Decoder = FGIFLoaderFactory::CreateLoader(GifFilename, ImageBuffer);
-	check(Decoder.IsValid());
+	if (!Decoder.IsValid())
+	{
+		ReadResult.OutError = FString::Printf(TEXT("Failed to create decoder for: %s"), *GifFilename);
+		return;
+	}
 
 	bool bResult = Decoder->DecodeGIF(MoveTemp(ImageBuffer));
 	if (!bResult)
